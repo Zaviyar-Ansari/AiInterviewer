@@ -216,9 +216,11 @@ export default function Dashboard({ user }: DashboardProps) {
     const urlParts = session.video_url.split("/");
     const fileName = urlParts[urlParts.length - 1];
 
-    // For raw .webm files, find conversion record
+    // For raw .webm files, find conversion record (match by filename suffix)
     if (fileName.includes(".webm")) {
-      const conversion = conversions.find((c: any) => c.filename === fileName);
+      const conversion = conversions.find(
+        (c: any) => typeof c?.filename === "string" && c.filename.endsWith(fileName)
+      );
       return conversion;
     }
 
@@ -294,6 +296,12 @@ export default function Dashboard({ user }: DashboardProps) {
             Completed
           </Badge>
         );
+      case "completed":
+        return (
+          <Badge variant="default" className="bg-green-100 text-green-800">
+            Completed
+          </Badge>
+        );
       case "created":
         return (
           <Badge variant="secondary" className="bg-blue-100 text-blue-800">
@@ -314,6 +322,8 @@ export default function Dashboard({ user }: DashboardProps) {
   const getStatusIcon = (status: string) => {
     switch (status) {
       case "uploaded":
+        return <CheckCircle className="h-4 w-4 text-green-600" />;
+      case "completed":
         return <CheckCircle className="h-4 w-4 text-green-600" />;
       case "created":
         return <Clock className="h-4 w-4 text-blue-600" />;
@@ -717,7 +727,7 @@ export default function Dashboard({ user }: DashboardProps) {
                           const conversion = getConversionStatus(session);
                           return (
                             conversion?.status === "completed" ||
-                            (!conversion && session?.status === "uploaded")
+                            (!conversion && (session?.status === "uploaded" || session?.status === "completed"))
                           );
                         })() && (
                           <div className="flex space-x-2 flex-1">

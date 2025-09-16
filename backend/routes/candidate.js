@@ -106,30 +106,6 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
 
     if (!file) return res.status(400).json({ error: 'No video file provided' });
 
-    // Upload to Supabase Storage in raw/ folder with sessionId in filename
-    const sessionId = req.body.sessionId || 'unknownsession';
-    const fileName = `raw/${req.user.email}/${sessionId}_${Date.now()}_${file.originalname}`;
-    console.log('Uploading to storage:', fileName);
-    console.log('File buffer size:', file.buffer.length);
-    console.log('Content type being set:', file.mimetype);
-
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from('interview-videos')
-      .upload(fileName, file.buffer, {
-        contentType: file.mimetype,
-      });
-
-    if (uploadError) {
-      console.error('Storage upload error:', uploadError);
-      throw uploadError;
-    }
-
-    // Get public URL
-    const { data: urlData } = supabaseAdmin.storage
-      .from('interview-videos')
-      .getPublicUrl(fileName);
-    console.log('Public URL:', urlData.publicUrl);
-
     // Ensure user exists in users table
     const { data: existingUser } = await supabaseAdmin
       .from('users')
@@ -148,10 +124,10 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
       }
     }
 
-    // Save to database - video_url will be updated by the conversion process
+    // 1) Create DB session first to get real sessionId
     const { data: sessionData, error: dbError } = await req.supabaseUser
       .from('interview_sessions')
-      .insert([{ user_email: req.user.email, title, status: 'processing', video_url: urlData.publicUrl }])
+      .insert([{ user_email: req.user.email, title, status: 'processing' }])
       .select();
 
     if (dbError) {
@@ -159,11 +135,56 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
       throw dbError;
     }
 
+    const sessionId = sessionData[0].id;
+
+    // 2) Upload to Supabase Storage in raw/ folder with sessionId in filename
+    const fileName = `raw/${req.user.email}/${sessionId}_${Date.now()}_${file.originalname}`;
+    console.log('Uploading to storage:', fileName);
+    console.log('File buffer size:', file.buffer.length);
+    console.log('Content type being set:', file.mimetype);
+
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from('interview-videos')
+      .upload(fileName, file.buffer, {
+        contentType: file.mimetype,
+      });
+
+    if (uploadError) {
+      console.error('Storage upload error:', uploadError);
+      throw uploadError;
+    }
+
+    // 3) Get public URL of raw upload and update session with it (still processing)
+    const { data: urlData } = supabaseAdmin.storage
+      .from('interview-videos')
+      .getPublicUrl(fileName);
+    console.log('Public URL:', urlData.publicUrl);
+
+    await req.supabaseUser
+      .from('interview_sessions')
+      .update({ video_url: urlData.publicUrl })
+      .eq('id', sessionId);
+
+    // Seed a conversions tracking row so UI can reflect progress
+    try {
+      await supabaseAdmin
+        .from('conversions')
+        .insert([
+          {
+            filename: fileName,
+            status: 'pending',
+            original_url: urlData.publicUrl,
+          },
+        ]);
+    } catch (seedErr) {
+      console.warn('Failed to seed conversions row (non-fatal):', seedErr);
+    }
+
     // Start video conversion process
     const convertVideo = async (userClient) => {
       try {
         // Update conversion status to converting
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({ status: 'converting', updated_at: new Date().toISOString() })
           .eq('filename', fileName);
@@ -210,7 +231,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .getPublicUrl(mp4FileName);
 
         // Update conversion record
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({
             status: 'completed',
@@ -220,11 +241,11 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .eq('filename', fileName);
 
         // Update session with MP4 URL
-        await userClient
+        await supabaseAdmin
           .from('interview_sessions')
           .update({
             video_url: mp4UrlData.publicUrl,
-            status: 'completed',
+            status: 'uploaded',
             updated_at: new Date().toISOString()
           })
           .eq('id', sessionData[0].id);
@@ -242,7 +263,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
         console.error('Video conversion failed:', conversionError);
 
         // Update conversion status to failed
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({
             status: 'failed',
@@ -252,7 +273,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .eq('filename', fileName);
 
         // Update session status to failed
-        await userClient
+        await supabaseAdmin
           .from('interview_sessions')
           .update({
             status: 'failed',
@@ -267,7 +288,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
 
     res.status(201).json({
       message: 'Session created - video conversion in progress',
-      session: sessionData[0],
+      session: { ...sessionData[0], video_url: urlData.publicUrl },
       conversion_status: 'queued'
     });
   } catch (error) {
@@ -299,9 +320,12 @@ router.get('/sessions', authenticate, async (req, res) => {
 // ---------------- Get user's conversions ----------------
 router.get('/conversions', authenticate, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // Use the authenticated user client so RLS sees role=authenticated
+    const email = req.user.email;
+    const { data, error } = await req.supabaseUser
       .from('conversions')
       .select('*')
+      .like('filename', `raw/${email}/%`)
       .order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data);
@@ -323,8 +347,15 @@ router.delete('/session/:id', authenticate, async (req, res) => {
 
     if (fetchError || !session) return res.status(404).json({ error: 'Session not found' });
 
-    const fileName = session.video_url.split('/').pop();
-    await supabaseAdmin.storage.from('interview-videos').remove([fileName]);
+    // Derive the storage path after the bucket name
+    // Example public URL: https://.../storage/v1/object/public/interview-videos/converted/user@example.com/xyz.mp4
+    const url = session.video_url || '';
+    const marker = '/interview-videos/';
+    const idx = url.indexOf(marker);
+    const storagePath = idx >= 0 ? url.substring(idx + marker.length) : '';
+    if (storagePath) {
+      await supabaseAdmin.storage.from('interview-videos').remove([storagePath]);
+    }
 
     const { error } = await supabase
       .from('interview_sessions')
@@ -356,7 +387,7 @@ router.post('/upload', authenticate, upload.single('video'), async (req, res) =>
 
     if (fetchError || !session) return res.status(404).json({ error: 'Session not found' });
 
-    const fileName = `raw/${userEmail}/${sessionId}_${file.originalname}`;
+    const fileName = `raw/${userEmail}/${sessionId}_${Date.now()}_${file.originalname}`;
     const { error: uploadError } = await supabaseAdmin.storage
       .from('interview-videos')
       .upload(fileName, file.buffer, {
@@ -368,13 +399,73 @@ router.post('/upload', authenticate, upload.single('video'), async (req, res) =>
       .from('interview-videos')
       .getPublicUrl(fileName);
 
-    const { error: updateError } = await supabase
+    // Update session to processing and set raw URL while we convert
+    await supabase
       .from('interview_sessions')
-      .update({ video_url: urlData.publicUrl })
+      .update({ video_url: urlData.publicUrl, status: 'processing' })
       .eq('id', sessionId);
-    if (updateError) throw updateError;
 
-    res.json({ message: 'Video uploaded', video_url: urlData.publicUrl });
+    // Seed conversions row
+    try {
+      await supabaseAdmin
+        .from('conversions')
+        .insert([{ filename: fileName, status: 'pending', original_url: urlData.publicUrl }]);
+    } catch (seedErr) {
+      console.warn('Failed to seed conversions row (non-fatal):', seedErr);
+    }
+
+    // Start conversion async
+    (async () => {
+      try {
+        const tempDir = os.tmpdir();
+        const inputPath = path.join(tempDir, `input_${Date.now()}.webm`);
+        const outputPath = path.join(tempDir, `output_${Date.now()}.mp4`);
+
+        const { data: fileData, error: downloadError } = await supabaseAdmin.storage
+          .from('interview-videos')
+          .download(fileName);
+        if (downloadError || !fileData) throw new Error(`Failed to download file: ${downloadError?.message}`);
+
+        fs.writeFileSync(inputPath, Buffer.from(await fileData.arrayBuffer()));
+
+        await convertVideoToMp4(inputPath, outputPath);
+
+        const convertedBuffer = fs.readFileSync(outputPath);
+        const mp4FileName = fileName.replace('raw/', 'converted/').replace('.webm', '.mp4');
+        const { error: uploadMp4Error } = await supabaseAdmin.storage
+          .from('interview-videos')
+          .upload(mp4FileName, convertedBuffer, { contentType: 'video/mp4', upsert: true });
+        if (uploadMp4Error) throw new Error(`Failed to upload MP4: ${uploadMp4Error.message}`);
+
+        const { data: mp4UrlData } = supabaseAdmin.storage
+          .from('interview-videos')
+          .getPublicUrl(mp4FileName);
+
+        await supabaseAdmin
+          .from('conversions')
+          .update({ status: 'completed', converted_url: mp4UrlData.publicUrl, updated_at: new Date().toISOString() })
+          .eq('filename', fileName);
+
+        await supabase
+          .from('interview_sessions')
+          .update({ video_url: mp4UrlData.publicUrl, status: 'uploaded', updated_at: new Date().toISOString() })
+          .eq('id', sessionId);
+
+        try { fs.unlinkSync(inputPath); fs.unlinkSync(outputPath); } catch {}
+      } catch (err) {
+        console.error('Retake conversion failed:', err);
+        await supabaseAdmin
+          .from('conversions')
+          .update({ status: 'failed', error_message: String(err), updated_at: new Date().toISOString() })
+          .eq('filename', fileName);
+        await supabase
+          .from('interview_sessions')
+          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .eq('id', sessionId);
+      }
+    })();
+
+    res.json({ message: 'Video uploaded, conversion in progress', video_url: urlData.publicUrl, status: 'processing' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
