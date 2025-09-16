@@ -148,7 +148,22 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
       }
     }
 
-    // Save to database - video_url will be updated by the conversion process
+    // Create/queue conversion record so the dashboard can track progress
+    try {
+      await supabaseAdmin
+        .from('conversions')
+        .insert([
+          {
+            filename: fileName,
+            status: 'pending',
+            original_url: urlData.publicUrl,
+          },
+        ]);
+    } catch (convInsertErr) {
+      console.warn('Could not insert conversion row (will still proceed):', convInsertErr);
+    }
+
+    // Save to database - video_url (raw) will be replaced by the converted MP4 URL
     const { data: sessionData, error: dbError } = await req.supabaseUser
       .from('interview_sessions')
       .insert([{ user_email: req.user.email, title, status: 'processing', video_url: urlData.publicUrl }])
@@ -224,7 +239,8 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .from('interview_sessions')
           .update({
             video_url: mp4UrlData.publicUrl,
-            status: 'completed',
+            // align with dashboard which treats 'uploaded' as ready
+            status: 'uploaded',
             updated_at: new Date().toISOString()
           })
           .eq('id', sessionData[0].id);
@@ -299,7 +315,8 @@ router.get('/sessions', authenticate, async (req, res) => {
 // ---------------- Get user's conversions ----------------
 router.get('/conversions', authenticate, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // use authenticated client to satisfy RLS
+    const { data, error } = await req.supabaseUser
       .from('conversions')
       .select('*')
       .order('created_at', { ascending: false });
