@@ -212,14 +212,20 @@ export default function Dashboard({ user }: DashboardProps) {
   const getConversionStatus = (session: any) => {
     if (!session?.video_url) return null;
 
-    // Extract filename from video URL - look for .webm files in raw folder
+    // Extract filename from video URL - look for raw folder files
     const urlParts = session.video_url.split("/");
-    const fileName = urlParts[urlParts.length - 1];
-
-    // For raw .webm files, find conversion record
-    if (fileName.includes(".webm")) {
+    
+    // Check if this is a raw folder video URL (needs conversion)
+    if (session.video_url.includes('/raw/')) {
+      // Extract the filename from the raw folder URL
+      const fileName = urlParts.slice(-3).join('/'); // raw/{email}/{filename}
       const conversion = conversions.find((c: any) => c.filename === fileName);
       return conversion;
+    }
+
+    // If it's already in converted folder, no conversion needed
+    if (session.video_url.includes('/converted/')) {
+      return { status: 'completed', converted_url: session.video_url };
     }
 
     return null;
@@ -487,9 +493,17 @@ export default function Dashboard({ user }: DashboardProps) {
                       session?.video_url ? "cursor-pointer" : ""
                     }`}
                     onClick={() => {
-                      if (session?.video_url) {
-                        console.log("Opening video:", session.video_url);
-                        setOpenVideoUrl(session.video_url);
+                      const conversion = getConversionStatus(session);
+                      let videoUrl = session?.video_url;
+                      
+                      // Use converted URL if available
+                      if (conversion?.converted_url) {
+                        videoUrl = conversion.converted_url;
+                      }
+                      
+                      if (videoUrl) {
+                        console.log("Opening video:", videoUrl);
+                        setOpenVideoUrl(videoUrl);
                       } else {
                         console.log(
                           "No video URL available for session:",
@@ -534,7 +548,10 @@ export default function Dashboard({ user }: DashboardProps) {
                         {session?.video_url ? (
                           <>
                             <video
-                              src={session.video_url}
+                              src={(() => {
+                                const conversion = getConversionStatus(session);
+                                return conversion?.converted_url || session.video_url;
+                              })()}
                               className="w-full h-full object-cover"
                               muted
                               playsInline
@@ -727,12 +744,15 @@ export default function Dashboard({ user }: DashboardProps) {
                               className="flex-1 bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100 hover:border-blue-300"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                if (session?.video_url) {
+                                const conversion = getConversionStatus(session);
+                                const videoUrl = conversion?.converted_url || session?.video_url;
+                                
+                                if (videoUrl) {
                                   console.log(
                                     "Watch Video button clicked, URL:",
-                                    session.video_url
+                                    videoUrl
                                   );
-                                  setOpenVideoUrl(session.video_url);
+                                  setOpenVideoUrl(videoUrl);
                                 } else {
                                   console.log(
                                     "Watch Video button clicked but no URL available"
@@ -753,14 +773,17 @@ export default function Dashboard({ user }: DashboardProps) {
                               className="bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100"
                               onClick={async (e) => {
                                 e.stopPropagation();
-                                if (session?.video_url) {
+                                const conversion = getConversionStatus(session);
+                                const videoUrl = conversion?.converted_url || session?.video_url;
+                                
+                                if (videoUrl) {
                                   try {
                                     console.log(
                                       "Testing video URL accessibility:",
-                                      session.video_url
+                                      videoUrl
                                     );
                                     const response = await fetch(
-                                      session.video_url,
+                                      videoUrl,
                                       { method: "HEAD" }
                                     );
                                     console.log(

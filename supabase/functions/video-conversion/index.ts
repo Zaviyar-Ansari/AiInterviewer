@@ -97,6 +97,8 @@ serve(async (req) => {
       const sessionId = fileParts[0]
       const userEmail = pathParts[1]
 
+      console.log('Updating session:', sessionId, 'for user:', userEmail)
+
       const { error: sessionUpdateError } = await supabaseClient
         .from('interview_sessions')
         .update({
@@ -109,6 +111,8 @@ serve(async (req) => {
 
       if (sessionUpdateError) {
         console.error('Error updating session with mp4 URL:', sessionUpdateError)
+      } else {
+        console.log('Successfully updated session with converted video URL')
       }
     }
 

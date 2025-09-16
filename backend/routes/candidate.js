@@ -159,11 +159,24 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
       throw dbError;
     }
 
+    // Create conversion record
+    const { error: conversionError } = await supabaseAdmin
+      .from('conversions')
+      .insert([{ 
+        filename: fileName, 
+        status: 'pending', 
+        original_url: urlData.publicUrl 
+      }]);
+
+    if (conversionError) {
+      console.error('Conversion record creation error:', conversionError);
+    }
+
     // Start video conversion process
     const convertVideo = async (userClient) => {
       try {
         // Update conversion status to converting
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({ status: 'converting', updated_at: new Date().toISOString() })
           .eq('filename', fileName);
@@ -210,7 +223,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .getPublicUrl(mp4FileName);
 
         // Update conversion record
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({
             status: 'completed',
@@ -219,12 +232,12 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           })
           .eq('filename', fileName);
 
-        // Update session with MP4 URL
-        await userClient
+        // Update session with MP4 URL and status
+        await supabaseAdmin
           .from('interview_sessions')
           .update({
             video_url: mp4UrlData.publicUrl,
-            status: 'completed',
+            status: 'uploaded',
             updated_at: new Date().toISOString()
           })
           .eq('id', sessionData[0].id);
@@ -242,7 +255,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
         console.error('Video conversion failed:', conversionError);
 
         // Update conversion status to failed
-        await userClient
+        await supabaseAdmin
           .from('conversions')
           .update({
             status: 'failed',
@@ -252,7 +265,7 @@ router.post('/session', authenticate, upload.single('video'), async (req, res) =
           .eq('filename', fileName);
 
         // Update session status to failed
-        await userClient
+        await supabaseAdmin
           .from('interview_sessions')
           .update({
             status: 'failed',
