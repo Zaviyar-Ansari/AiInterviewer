@@ -216,10 +216,15 @@ export default function Dashboard({ user }: DashboardProps) {
     const urlParts = session.video_url.split("/");
     const fileName = urlParts[urlParts.length - 1];
 
-    // For raw .webm files, find conversion record
+    // For raw .webm files, find conversion record. The DB stores full paths like
+    // raw/{email}/{sessionId}_timestamp_original.webm, so match by tail filename.
     if (fileName.includes(".webm")) {
-      const conversion = conversions.find((c: any) => c.filename === fileName);
-      return conversion;
+      const conversion = conversions.find(
+        (c: any) =>
+          typeof c?.filename === "string" &&
+          (c.filename === fileName || c.filename.endsWith(`/${fileName}`))
+      );
+      return conversion ?? null;
     }
 
     return null;
@@ -717,7 +722,9 @@ export default function Dashboard({ user }: DashboardProps) {
                           const conversion = getConversionStatus(session);
                           return (
                             conversion?.status === "completed" ||
-                            (!conversion && session?.status === "uploaded")
+                            (!conversion &&
+                              (session?.status === "uploaded" ||
+                                session?.status === "completed"))
                           );
                         })() && (
                           <div className="flex space-x-2 flex-1">
